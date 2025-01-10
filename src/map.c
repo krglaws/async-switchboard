@@ -12,7 +12,7 @@
  */
 static int count_pairs(const char* s, const char* delim) {
     if (s == NULL || delim == NULL) {
-        return -1;
+        return 0;
     }
     int count = 1;
     char* finder = (char*)s;
@@ -44,11 +44,21 @@ void print_map(const ks_hashmap* hm) {
 
 ks_hashmap* new_map_from_str(const char* s, const char* delim1,
                              const char* delim2) {
-    int num_buckets = (int)(((double)count_pairs(s, delim1)) * 1.5f) / 2;
+    if (s == NULL || delim1 == NULL || delim2 == NULL) {
+        return NULL;
+    }
+    int pairs = count_pairs(s, delim1);
+    if (pairs == 0) {
+        return NULL;
+    }
+    int num_buckets = (int)((pairs) * 1.5);
+    if (num_buckets < 16) {
+        num_buckets = 16;
+    }
     ks_hashmap* hm = ks_hashmap_new(KS_CHARP, num_buckets);
 
     char* next = (char*)s;
-    while (next != NULL) {
+    while (*next != '\0') {
         char* mid = strstr(next, delim2);
         if (mid == NULL) {
             goto ERROR;
@@ -60,7 +70,7 @@ ks_hashmap* new_map_from_str(const char* s, const char* delim1,
 
         ks_datacont* key = ks_datacont_new(next, KS_CHARP, mid - next);
         ks_datacont* val =
-            ks_datacont_new(next, KS_CHARP, end - (mid + strlen(delim2)));
+            ks_datacont_new(mid+strlen(delim2), KS_CHARP, end - (mid + strlen(delim2)));
         const ks_datacont* exists = ks_hashmap_get(hm, key);
         if (exists != NULL) {
             ks_list_add(exists->ls, val);
@@ -72,7 +82,7 @@ ks_hashmap* new_map_from_str(const char* s, const char* delim1,
             ks_hashmap_add(hm, key, dc);
         }
 
-        next = strstr(end + strlen(delim1), delim1);
+        next = end + strlen(delim1);
     }
 
     return hm;

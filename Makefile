@@ -29,7 +29,7 @@ $(MAPTESTTARG): $(TEST)/map_test.c
 	$(CC) $^ -o $@ $(TESTFLAGS)
 
 .PHONY: tests
-tests: $(MAPTESTTARG)
+tests: $(MAPTESTTARG) $(MAPDEPS)
 	@echo Finished building tests.
 
 .PHONY: run_tests
