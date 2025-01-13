@@ -37,6 +37,7 @@ void print_map(const ks_hashmap* hm) {
         while ((val = ks_iterator_next(ls_iter)) != NULL) {
             printf(" %s", val->cp);
         }
+        ks_iterator_delete(ls_iter);
         printf("\n");
     }
     ks_iterator_delete(hm_iter);
@@ -51,7 +52,7 @@ ks_hashmap* new_map_from_str(const char* s, const char* delim1,
     if (pairs == 0) {
         return NULL;
     }
-    int num_buckets = (int)((pairs) * 1.5);
+    int num_buckets = (int)((pairs)*1.5);
     if (num_buckets < 16) {
         num_buckets = 16;
     }
@@ -65,12 +66,12 @@ ks_hashmap* new_map_from_str(const char* s, const char* delim1,
         }
         char* end = strstr(mid, delim1);
         if (end == NULL) {
-            goto ERROR;
+            end = mid + strlen(mid);
         }
 
         ks_datacont* key = ks_datacont_new(next, KS_CHARP, mid - next);
-        ks_datacont* val =
-            ks_datacont_new(mid+strlen(delim2), KS_CHARP, end - (mid + strlen(delim2)));
+        ks_datacont* val = ks_datacont_new(mid + strlen(delim2), KS_CHARP,
+                                           end - (mid + strlen(delim2)));
         const ks_datacont* exists = ks_hashmap_get(hm, key);
         if (exists != NULL) {
             ks_list_add(exists->ls, val);
@@ -82,7 +83,10 @@ ks_hashmap* new_map_from_str(const char* s, const char* delim1,
             ks_hashmap_add(hm, key, dc);
         }
 
-        next = end + strlen(delim1);
+        next = end;
+        if (*next != '\0') {
+            next += strlen(delim1);
+        }
     }
 
     return hm;

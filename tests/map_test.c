@@ -3,7 +3,6 @@
 #include <assert.h>
 #include <stdlib.h>
 
-
 void test_count_pairs() {
     struct test_case {
         const char* str;
@@ -52,7 +51,8 @@ void test_new_map_from_str_fails() {
 }
 
 void test_new_map_from_str_succeeds_headers() {
-    const char* headers = "Content-Type: text/html\r\n"
+    const char* headers =
+        "Content-Type: text/html\r\n"
         "Content-Length: 1024\r\n"
         "Host: wwww.google.com\r\n";
     const char* delim1 = "\r\n";
@@ -64,17 +64,18 @@ void test_new_map_from_str_succeeds_headers() {
     assert(ks_hashmap_count(hm) == 3);
 
     struct test_case {
-        char *key;
-        char *val;
+        char* key;
+        char* val;
     };
     struct test_case tests[3] = {
-        {.key="Content-Type", .val=" text/html"},
-        {.key="Content-Length", .val=" 1024"},
-        {.key="Host", .val=" www.google.com"},
+        {.key = "Content-Type", .val = " text/html"},
+        {.key = "Content-Length", .val = " 1024"},
+        {.key = "Host", .val = " www.google.com"},
     };
 
     for (int i = 0; i < 3; i++) {
-        ks_datacont* key = ks_datacont_new(tests[i].key, KS_CHARP, strlen(tests[i].key));
+        ks_datacont* key =
+            ks_datacont_new(tests[i].key, KS_CHARP, strlen(tests[i].key));
 
         const ks_datacont* value = ks_hashmap_get(hm, key);
         assert(value != NULL);
@@ -83,6 +84,47 @@ void test_new_map_from_str_succeeds_headers() {
         ks_datacont_delete(key);
     }
 
+    //print_map(hm);
+
+    ks_hashmap_delete(hm);
+}
+
+void test_new_map_from_str_succeeds_config() {
+    const char* headers =
+        "api.chessticulate.com 192.168.0.10\n"
+        "chessticulate.com 192.168.0.11\n"
+        "3rd-place.com 192.168.0.12";
+    const char* delim1 = "\n";
+    const char* delim2 = " ";
+
+    ks_hashmap* hm = new_map_from_str(headers, delim1, delim2);
+
+    assert(hm != NULL);
+    assert(ks_hashmap_count(hm) == 3);
+
+    struct test_case {
+        char* key;
+        char* val;
+    };
+    struct test_case tests[3] = {
+        {.key = "api.chessticulate.com", .val = "192.168.0.10"},
+        {.key = "chessticulate.com", .val = "192.168.0.11"},
+        {.key = "3rd-place.com", .val = "192.168.0.12"},
+    };
+
+    for (int i = 0; i < 3; i++) {
+        ks_datacont* key =
+            ks_datacont_new(tests[i].key, KS_CHARP, strlen(tests[i].key));
+
+        const ks_datacont* value = ks_hashmap_get(hm, key);
+        assert(value != NULL);
+        assert(strcmp(value->cp, tests[i].val));
+
+        ks_datacont_delete(key);
+    }
+
+    //print_map(hm);
+
     ks_hashmap_delete(hm);
 }
 
@@ -90,4 +132,5 @@ int main() {
     test_count_pairs();
     test_new_map_from_str_fails();
     test_new_map_from_str_succeeds_headers();
+    test_new_map_from_str_succeeds_config();
 }
