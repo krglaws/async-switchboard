@@ -1,49 +1,46 @@
-CC := clang
-CFLAGS := -lkylestructs -Iinclude -Wall -Wextra -O2
-TESTFLAGS := -lkylestructs -Iinclude -Isrc -g -O0 -fsanitize=address,undefined
+# Variables
+CC = clang
+CFLAGS = -Wall -Wextra -Iinclude -lkylestructs
+DEBUG_CFLAGS = -Wall -Wextra -g -Iinclude -I. -g -O0 -fsanitize=address,undefined -lkylestructs
+RELEASE_CFLAGS = -Wall -Wextra -O2 -Iinclude
+SRC_DIR = src
+TEST_DIR = tests
+BUILD_DIR = build
+TARGET = $(BUILD_DIR)/main
 
-SRC := src
-INC := include
-SBIN := bin
+SRC_FILES = $(wildcard $(SRC_DIR)/*.c)
+TEST_FILES = $(wildcard $(TEST_DIR)/*.c)
+OBJ_FILES = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/release_%.o, $(SRC_FILES))
+DEBUG_OBJ_FILES = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/debug_%.o, $(SRC_FILES))
+TEST_OBJ_FILES = $(patsubst $(TEST_DIR)/%.c, $(BUILD_DIR)/test_%.o, $(TEST_FILES))
 
-TEST := tests
-TBIN := testbin
+# Rules
+.PHONY: all clean tests
 
-default: all
+all: $(TARGET)
 
-dir_guard=@mkdir -p $(SBIN) $(TBIN)
+$(BUILD_DIR):
+	@mkdir -p $@
 
-# compile sources
+# Build release objects
+$(BUILD_DIR)/release_%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+	$(CC) $(RELEASE_CFLAGS) -c $< -o $@
 
-MAPDEPS := $(SRC)/map.c 
-MAPTARG := $(SBIN)/map.o
-$(MAPTARG): $(MAPDEPS)
-	$(dir_guard)
-	$(CC) -c $< -o $@ $(CFLAGS)
+# Build debug objects
+$(BUILD_DIR)/debug_%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+	$(CC) $(DEBUG_CFLAGS) -c $< -o $@
 
-# compile tests
+# Test target uses debug objects and test objects
+$(BUILD_DIR)/test_%.o: $(TEST_DIR)/%.c | $(BUILD_DIR)
+	$(CC) $(DEBUG_CFLAGS) $< -o $@
 
-MAPTESTTARG := $(TBIN)/map_test
-$(MAPTESTTARG): $(TEST)/map_test.c
-	$(dir_guard)
-	$(CC) $^ -o $@ $(TESTFLAGS)
+# Main target uses release objects
+$(TARGET): $(OBJ_FILES) | $(BUILD_DIR)
+	$(CC) $(RELEASE_CFLAGS) $^ -o $@
 
-.PHONY: tests
-tests: $(MAPTESTTARG) $(MAPDEPS)
-	@echo Finished building tests.
-
-.PHONY: run_tests
-run_tests: tests
+test: $(TEST_OBJ_FILES)
 	./runtests.sh
 
-.PHONY: clean
 clean:
-	rm -f $(SBIN)/*
-	rm -f $(TBIN)/*
+	rm -rf $(BUILD_DIR)
 
-.PHONY: all
-all: run_tests
-	@echo "All tests passed."
-	@echo "Building executable..."
-	#$(MAKE) $(EXE)
-	@echo "Done."

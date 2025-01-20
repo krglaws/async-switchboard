@@ -2,20 +2,21 @@
 ERRTITLE="TESTS FAILED:"
 FAILED=""
 
-TESTBIN="testbin"
+BUILDDIR="./build"
 
-if [ -z "testbin/*" ];
+if [ ! -d $BUILDDIR ] || [ -z "$(ls $BUILDDIR/test_*)" ];
 then
     echo "Tests have not been built; run 'make test'"
+    exit 1
 fi
 
 echo ==============================
 echo ----------------------------
 echo Running all test suites...
 
-for TESTFILE in $(ls $TESTBIN)
+for TESTFILE in $(ls $BUILDDIR/test_*)
 do
-	./$TESTBIN/$TESTFILE
+	$TESTFILE
 	if [ $? != 0 ]
 	then
 		FAILED="${FAILED}${TESTFILE}\n"
