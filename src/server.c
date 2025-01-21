@@ -1,9 +1,9 @@
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/epoll.h>
 #include <arpa/inet.h>
-#include <string.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
 int serve() {
     /* create server socket */
@@ -15,7 +15,8 @@ int serve() {
 
     /* enable IPv4 and IPv6 dual-stack */
     int optval = 0;
-    if (setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &optval, sizeof(optval)) == -1) {
+    if (setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &optval,
+                   sizeof(optval)) == -1) {
         perror("setsockopt()");
         return -1;
     }
@@ -25,10 +26,7 @@ int serve() {
     memset(&addr, 0, sizeof(addr));
     addr.sin6_family = AF_INET6;
     addr.sin6_port = htons(8080);
-    if (inet_pton(AF_INET6, "", &addr.sin6_addr) != 1)
-
-    return 0;
+    if (inet_pton(AF_INET6, "", &addr.sin6_addr) != 1) return 0;
 }
 
-int main() {
-}
+int main() {}

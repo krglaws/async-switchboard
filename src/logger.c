@@ -1,135 +1,137 @@
+#define _GNU_SOURCE
+#include "logger.h"
+
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
 #include <time.h>
-#include <signal.h>
-
-#include "log_manager.h"
-
-#define MAXLOGLEN (1024 + 1)
-
-#define INFOSTR "\e[92m[INFO]:\e[0m "
-#define WARNSTR "\e[93m[WARN]:\e[0m "
-#define ERRSTR  "\e[91m[ERROR]:\e[0m "
-#define CRITSTR "\e[91m[CRITICAL]:\e[0m "
-
-static void log_all(const char* logtype, const char* fmt, va_list ap);
-static void terminate_log_manager();
+#include <unistd.h>
+#include <kylestructs.h>
 
 
-// this is the output file for all logs
-// which can be configured via CLI args
-static FILE* logfile = NULL;
+typedef struct {
+    int in_fd;
+    int out_fd;
+} logger_args_t;
 
 
-// temporary storage buffer for incoming log messages
-static char logbuff[MAXLOGLEN];
+static ks_list *log_queue = NULL;
 
 
-static void log_all(const char* logtype, const char* fmt, va_list ap)
-{
-  // get datetime
-  char timebuff[32];
-  time_t rawtime = time(NULL);
-  struct tm* ptm = localtime(&rawtime);
-  strftime(timebuff, sizeof(timebuff), "%x %T", ptm);
+static void* logger_main(void* args) {
+    int in_fd = ((logger_args_t*)args)->in_fd;
+    int out_fd = ((logger_args_t*)args)->out_fd;
+    char buffer[LOG_BUFFER_SIZE];
 
-  // process format string
-  vsprintf(logbuff, fmt, ap);
+    while (true) {
+        int read_bytes;
+        if ((read_bytes = read(in_fd, buffer, LOG_BUFFER_SIZE)) < 0) {
+            perror("read()");
+            break;
+        }
 
-  int len;
-  char* buffptr = logbuff;
-  char* nlloc;
-
-  // for each '\n' char in message,
-  // print preceding 'logtype' string
-  do
-  {
-    if ((nlloc = strstr(buffptr, "\n")) != NULL)
-    {
-      len = (int) (nlloc - buffptr);
-    }
-    else
-    {
-      len = strlen(buffptr);
+        int written_bytes;
+        if ((written_bytes = write(out_fd, buffer, read_bytes)) < 0) {
+            perror("write()");
+            break;
+        }
     }
 
-    fprintf(logfile, "(%s)%s%.*s\n", timebuff, logtype, len, buffptr);
-    buffptr += (len + 1);
-
-  } while (*buffptr);
-
-  memset(logbuff, 0, MAXLOGLEN);
-}
-
-
-void init_log_manager(const char* path)
-{
-
-  if (path == NULL || strlen(path) == 0)
-  {
-    logfile = stdout;
-  }
-
-  else if ((logfile = fopen(path, "a")) == NULL)
-  {
-    fprintf(stderr, "init_logger(): failed to open log file '%s'\n", path);
     exit(EXIT_FAILURE);
-  }
+}
 
-  atexit(&terminate_log_manager);
+static void end_logger() {
+    ks_list_delete(log_queue);
+}
+
+int init_logger() {
+    log_queue = ks_list_new();
+
+    logger_args_t args;
+    int rw[2];
+    if (pipe(rw) == -1) {
+        perror("pipe()");
+        return -1;
+    }
+
+    args.in_fd = rw[0];
+    args.out_fd = 1;
+    int write_pipe = rw[1];
+
+    int flags = fcntl(rw[0], F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl(F_GETFL)");
+        return -1;
+    }
+    flags |= O_NONBLOCK;
+    if (fcntl(write_pipe, F_SETFL, flags) == -1) {
+        perror("fcntl(F_SETFL)");
+        return -1;
+    }
+
+    int err;
+    pthread_t thread;
+    if ((err = pthread_create(&thread, NULL, logger_main, &args)) != 0) {
+        fprintf(stderr, "pthread_create(): %s\n", strerror(err));
+        return -1;
+    }
+
+    if (atexit(end_logger) != 0) {
+        perror("atexit()");
+        return -1;
+    }
+
+    return 0;
 }
 
 
-static void terminate_log_manager()
-{
-  fclose(logfile);
-}
-
-
-void log_info(const char* fmt, ...)
-{
-  va_list ap;
-  va_start(ap, fmt);
-
-  log_all(INFOSTR, fmt, ap);
-
-  va_end(ap);
-}
-
-
-void log_warn(const char* fmt, ...)
-{
+void submit_log(const char* level, const char* filename, int lineno, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
 
-    log_all(WARNSTR, fmt, ap);
-
+    char msgbuff[LOG_BUFFER_SIZE];
+    if (vsnprintf(msgbuff, LOG_BUFFER_SIZE, fmt, ap) >= LOG_BUFFER_SIZE) {
+        sprintf(msgbuff, "Omitting log statement at %s:%d -- way too big!",
+                filename, lineno);
+    }
     va_end(ap);
-}
 
+    char timebuff[32];
+    time_t rawtime = time(NULL);
+    struct tm* ptm = localtime(&rawtime);
+    strftime(timebuff, sizeof(timebuff), "%x %T", ptm);
 
-void log_err(const char* fmt, ...)
-{
-  va_list ap;
-  va_start(ap, fmt);
+    int len;
+    char* buffptr = msgbuff;
+    char* nlloc;
+    char logbuff[LOG_BUFFER_SIZE];
 
-  log_all(ERRSTR, fmt, ap);
+    // for each '\n' char in message,
+    // print preceding 'logtype' string
+    do
+    {
+      if ((nlloc = strstr(buffptr, "\n")) != NULL)
+      {
+        len = (int) (nlloc - buffptr);
+      }
+      else
+      {
+        len = strlen(buffptr);
+      }
 
-  va_end(ap);
-}
+      //fprintf(logfile, "(%s)%s%.*s\n", timebuff, logtype, len, buffptr);
+      if (snprintf(logbuff, "(%s)%s%.*s\n", timebuff, level, len, buffptr) >= LOG_BUFFER_SIZE) {
+          sprintf(logbuff, "Omitting log statement at %s:%d -- way too big!", filename, lineno);
+      }
+      if (vsnprintf(logbuff, LOG_BUFFER_SIZE, fmt, ap) >= LOG_BUFFER_SIZE) {
+      }
 
+      buffptr += (len + 1);
 
-void log_crit(const char* fmt, ...)
-{
-  va_list ap;
-  va_start(ap, fmt);
-
-  log_all(CRITSTR, fmt, ap);
-
-  va_end(ap);
-
-  // terminate server process gracefully
-  raise(SIGTERM);
+    } while (*buffptr);
 }
