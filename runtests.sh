@@ -12,7 +12,7 @@ fi
 
 echo ==============================
 echo ----------------------------
-echo Running all test suites...
+echo Running all tests...
 
 for TESTFILE in $(ls $BUILDDIR/test_*)
 do
@@ -20,6 +20,9 @@ do
 	if [ $? != 0 ]
 	then
 		FAILED="${FAILED}${TESTFILE}\n"
+        echo $TESTFILE failed.
+    else
+        echo $TESTFILE succeeded.
 	fi
 done
 
