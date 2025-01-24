@@ -12,23 +12,23 @@
 #include <time.h>
 #include <unistd.h>
 
-typedef struct {
+struct logger_args{
     int in_fd;
     int out_fd;
-} logger_args_t;
+};
 
-typedef struct {
+struct logmsg{
     char *msg;
     size_t size;
     size_t written;
-} logmsg_t;
+};
 
 static int write_pipe;
 static ks_list *log_queue = NULL;
 
 static void *logger_main(void *args) {
-    int in_fd = ((logger_args_t *)args)->in_fd;
-    int out_fd = ((logger_args_t *)args)->out_fd;
+    int in_fd = ((struct logger_args *)args)->in_fd;
+    int out_fd = ((struct logger_args *)args)->out_fd;
     char buffer[LOG_BUFFER_SIZE];
 
     while (true) {
@@ -54,7 +54,7 @@ static void end_logger() {
     ks_iterator *iter = ks_iterator_new(log_queue, KS_LIST);
     const ks_datacont *dc;
     while ((dc = ks_iterator_next(iter)) != NULL) {
-        free(((logmsg_t *)dc->vp)->msg);
+        free(((struct logmsg *)dc->vp)->msg);
         free(dc->vp);
     }
     ks_list_delete(log_queue);
@@ -165,7 +165,7 @@ void emit_log(const char *level, const char *filename, int lineno,
         len = sprintf(logbuff, LOG_TOO_BIG_MSG, filename, lineno);
     }
 
-    logmsg_t *logmsg = malloc(sizeof(logmsg_t));
+    struct logmsg *logmsg = malloc(sizeof(struct logmsg));
     logmsg->msg = logbuff;
     logmsg->size = len;
     logmsg->written = 0;
@@ -178,7 +178,7 @@ int log_queue_size() { return ks_list_length(log_queue); }
 int flush_logs() {
     ks_datacont *log_dc;
     while ((log_dc = ks_list_dequeue(log_queue)) != NULL) {
-        logmsg_t *logmsg = log_dc->vp;
+        struct logmsg *logmsg = log_dc->vp;
         size_t len;
         do {
             len = write(write_pipe, logmsg->msg + logmsg->written,

@@ -23,8 +23,8 @@ int log_queue_size();
 #define LOG_INFO(fmt, ...) \
     emit_log(INFOLVL, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...) \
-    emit_log(INFOLVL, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+    emit_log(WARNLVL, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) \
-    emit_log(INFOLVL, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+    emit_log(ERRLVL, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 #endif
