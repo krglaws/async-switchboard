@@ -11,16 +11,39 @@
 #include "logger.h"
 #include <errno.h>
 
+enum context_state {
+    READING_EXT_HDRS,
+    WRITING_EXT_HDRS,
+    READING_EXT_BODY,
+    /* ^
+     * | cycle through these 
+     * | until body is written
+     * v
+     */
+    WRITING_EXT_BODY,
 
-struct client_context {
-    int external_fd;          // client socket
-    int internal_fd;          // target server socket
-    size_t request_size;      // number of bytes in the request
-    size_t write_offset;      // number of bytes sent so far
-    uint8_t* request_buffer;  // the request
+    READING_INT_HDRS,
+    WRITING_INT_HDRS,
+    READING_INT_BODY,
+    /* ^
+     * | cycle through these 
+     * | until body is written
+     * v
+     */
+    WRITING_INT_BODY
 };
 
-int setnonblocking(int sock) {
+struct context {
+    int external_sock;
+    int internal_sock;
+    size_t r_offset;
+    size_t w_offset;
+    size_t buffer_size;
+    char *buffer;
+    enum context_state state;
+};
+
+static int setnonblocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) {
         LOG_ERROR("failed on call to fcntl(F_GETFL): %s", strerror(errno));
@@ -33,7 +56,7 @@ int setnonblocking(int sock) {
     return 0;
 }
 
-int create_listen_sock(const char *address, uint16_t port) {
+static int create_listen_sock(const char *address, uint16_t port) {
     // create server socket
     int listen_sock = socket(AF_INET6, SOCK_STREAM, 0);
     if (listen_sock == -1) {
@@ -78,7 +101,7 @@ int create_listen_sock(const char *address, uint16_t port) {
     return listen_sock;
 }
 
-int new_connection(int epollfd, int listen_sock) {
+static int new_connection(int epollfd, int listen_sock) {
     struct sockaddr_in6 addr = {0};
     socklen_t addrlen = sizeof(addr);
     int conn_sock = accept(listen_sock, (struct sockaddr*)&addr, &addrlen);
@@ -95,8 +118,8 @@ int new_connection(int epollfd, int listen_sock) {
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
-    struct client_context *ctx = malloc(sizeof(struct client_context));
-    ctx->external_fd = conn_sock;
+    struct context *ctx = calloc(1, sizeof(struct context));
+    ctx->external_sock = conn_sock;
     ev.data.ptr = ctx;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock, &ev) == -1) {
         free(ctx);
@@ -108,8 +131,48 @@ int new_connection(int epollfd, int listen_sock) {
     return 0;
 }
 
-int handle_event() {
-    
+int read_until_wouldblock(int sock, char *buffer, size_t size) {
+    int rb, total = 0;
+    while ((rb = recv(sock, buffer, size, 0)) != -1) {
+        total += rb;
+    }
+    if (errno != EWOULDBLOCK) {
+        LOG_ERROR("failed on call to recv(): %s", strerror(errno));
+        return -1;
+    }
+    return total;
+}
+
+/*
+ * READING_EXTERNAL -> (WRITING_INTERNAL < - > READING_EXTERNAL) -> READING_INTERNAL -> (WRITING_EXTERNAL < - > READING_INTERNAL)
+ */
+int handle_event(struct context *ctx) {
+    int rwb;
+    switch (ctx->state) {
+        case READING_EXTERNAL:
+            rwb = read_until_wouldblock(ctx->external_sock, ctx->buffer, ctx->buffer_size);
+            if (rwb == -1) {
+                LOG_ERROR("failed to read client socket");
+            }
+            ctx->w_offset += rwb;
+            char *eoh = strstr(ctx->buffer, "\r\n\r\n");
+            if (eoh != NULL) {
+                // parse headers
+                // grab internal host header
+                // connect to internal host
+                // set to wrtiing 
+            }
+            break;
+        case WRITING_INTERNAL:
+            break;
+        case READING_INTERNAL:
+            break;
+        case WRITING_EXTERNAL:
+            break;
+        default:
+            LOG_ERROR("client context is in undefined state: %d", ctx->state);
+            return -1;
+    }
     return 0;
 }
 
@@ -119,7 +182,8 @@ int serve(const char *address, uint16_t port, int max_events) {
     int listen_sock = create_listen_sock(address, port);
     if (listen_sock == -1) {
         LOG_ERROR("failed to create listening socket");
-        return -1; }
+        return -1;
+    }
 
     int epollfd = epoll_create1(0);
     if (epollfd == -1) {
@@ -127,12 +191,16 @@ int serve(const char *address, uint16_t port, int max_events) {
         return -1;
     }
 
+    struct context *server_ctx = malloc(sizeof(struct context));
+    server_ctx->internal_sock = listen_sock;
     ev.events = EPOLLIN;
-    ev.data.fd = listen_sock;
+    ev.data.ptr = server_ctx;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listen_sock, &ev) == -1) {
         LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
         return -1;
     }
+
+    // TODO: need to use a hashmap to track internal/external socks -> context for cleanup
 
     while(true) {
         int nfds = epoll_wait(epollfd, events, max_events, -1);
@@ -140,14 +208,15 @@ int serve(const char *address, uint16_t port, int max_events) {
             LOG_ERROR("failed on call to epoll_wait(): %s", strerror(errno));
             goto ERROR;
         }
-
+        struct context *ctx;
         for (int n = 0; n < nfds; ++n) {
-            if (events[n].data.fd == listen_sock) {
+            ctx = (struct context *) events[n].data.ptr;
+            if (ctx->internal_sock == listen_sock) {
                 if (new_connection(epollfd, listen_sock) == -1) {
                     LOG_ERROR("failed to add new client connection");
                 }
             } else {
-                //do_use_fd(events[n].data.fd);
+                handle_event(ctx);
             }
         }
     }
