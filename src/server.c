@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <kylestructs.h>
 #include <string.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -10,8 +11,10 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <limits.h>
 #include "logger.h"
 #include <errno.h>
+#include "map.h"
 
 enum context_state {
     READING_EXT_HDRS,
@@ -38,6 +41,7 @@ enum context_state {
 struct context {
     int external_sock;
     int internal_sock;
+    char hostname[HOST_NAME_MAX];
     size_t r_offset;
     size_t w_offset;
     size_t buffer_size;
@@ -200,6 +204,34 @@ int get_header(const char *headers_start, const char *headers_end, const char *k
     return 0;
 }
 
+void read_external_headers(struct context *ctx) {
+    ssize_t wb = read_until_wouldblock(ctx->external_sock, ctx->buffer, ctx->buffer_size);
+    if (wb == -1) {
+        LOG_ERROR("failed to read client socket");
+        // close everything and delete context
+    }
+    ctx->w_offset += wb;
+
+    char *eoh = strstr(ctx->buffer, "\r\n\r\n");
+    if (eoh == NULL) {
+        if (ctx->w_offset >= ctx->buffer_size) {
+            // return 400 (headers too big), disconnect & delete context
+        }
+        return;
+    }
+    char host_buffer[HOST_NAME_MAX];
+    if (get_header(ctx->buffer, eoh, "host", host_buffer, sizeof(host_buffer)) == -1){
+        // return 400 (host header is required)
+    }
+    const char *ip = get_host_ip(host_buffer);
+    if (ip == NULL) {
+        // return 404 (host not found)
+    }
+
+
+}
+
+
 /*
  * READING_EXTERNAL -> (WRITING_INTERNAL <-> READING_EXTERNAL) -> READING_INTERNAL -> (WRITING_EXTERNAL <-> READING_INTERNAL)
  */
@@ -207,22 +239,6 @@ int handle_event(struct context *ctx) {
     ssize_t rwb;
     switch (ctx->state) {
         case READING_EXT_HDRS:
-            rwb = read_until_wouldblock(ctx->external_sock, ctx->buffer, ctx->buffer_size);
-            if (rwb == -1) {
-                LOG_ERROR("failed to read client socket");
-            }
-            ctx->w_offset += rwb;
-            char *eoh = strstr(ctx->buffer, "\r\n\r\n");
-            if (eoh != NULL) {
-                // grab internal host header
-                char host[32];
-                if (get_header(ctx->buffer, eoh, "host", host, sizeof(host)) == -1){
-                    // need to return 404 or something
-                }
-                // connect to internal host
-                // set to wrtiing 
-            }
-            break;
         default:
             LOG_ERROR("client context is in undefined state: %d", ctx->state);
             return -1;

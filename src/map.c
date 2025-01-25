@@ -1,16 +1,15 @@
 #include "map.h"
 
 #include <kylestructs.h>
+#include "logger.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 
-/* Really just meant to count occurences of the delimiter
- * between key/value pairs to get an approximate map size.
- * Does not check whether there are actual valid
- * key/value pairs.
- */
+ks_hashmap *host_map = NULL;
+
 static int count_pairs(const char* s, const char* delim) {
     if (s == NULL || delim == NULL) {
         return 0;
@@ -27,7 +26,7 @@ static int count_pairs(const char* s, const char* delim) {
     return count;
 }
 
-void print_map(const ks_hashmap* hm) {
+static void print_map(const ks_hashmap* hm) {
     ks_iterator* hm_iter = ks_iterator_new(hm, KS_HASHMAP);
     const ks_datacont* key;
     while ((key = ks_iterator_next(hm_iter)) != NULL) {
@@ -44,7 +43,7 @@ void print_map(const ks_hashmap* hm) {
     ks_iterator_delete(hm_iter);
 }
 
-ks_hashmap* new_map_from_str(const char* s, const char* delim1,
+static ks_hashmap* new_map_from_str(const char* s, const char* delim1,
                              const char* delim2) {
     if (s == NULL || delim1 == NULL || delim2 == NULL) {
         return NULL;
@@ -104,4 +103,38 @@ ks_hashmap* new_map_from_str(const char* s, const char* delim1,
 ERROR:
     ks_hashmap_delete(hm);
     return NULL;
+}
+
+static void end_host_map() {
+    ks_hashmap_delete(host_map);
+}
+
+int init_host_map(const char *mapstr) {
+    host_map = new_map_from_str(mapstr, "\n", " ");
+    if (host_map == NULL) {
+        LOG_ERROR("failed to parse host mapping");
+        return -1;
+    }
+
+    print_map(host_map);
+
+    if (atexit(end_host_map) != 0) {
+        LOG_ERROR("failed on call to atext(): %s", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+const char *get_host_ip(const char *host_name) {
+    ks_datacont *key_dc = malloc(sizeof(ks_datacont));
+    key_dc->type = KS_CHARP;
+    key_dc->cp = (char *)host_name;
+    key_dc->size = strlen(host_name);
+    const ks_datacont *val_dc = ks_hashmap_get(host_map, key_dc);
+    free(key_dc);
+    if (val_dc == NULL) {
+        return NULL;
+    }
+    return val_dc->cp;
 }
