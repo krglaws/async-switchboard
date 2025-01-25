@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -7,6 +8,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <ctype.h>
 #include <unistd.h>
 #include "logger.h"
 #include <errno.h>
@@ -131,10 +133,13 @@ static int new_connection(int epollfd, int listen_sock) {
     return 0;
 }
 
-int read_until_wouldblock(int sock, char *buffer, size_t size) {
-    int rb, total = 0;
+ssize_t read_until_wouldblock(int sock, char *buffer, ssize_t size) {
+    ssize_t rb, total = 0;
     while ((rb = recv(sock, buffer, size, 0)) != -1) {
         total += rb;
+        if (total == size) {
+            break;
+        }
     }
     if (errno != EWOULDBLOCK) {
         LOG_ERROR("failed on call to recv(): %s", strerror(errno));
@@ -143,13 +148,65 @@ int read_until_wouldblock(int sock, char *buffer, size_t size) {
     return total;
 }
 
+ssize_t write_until_wouldblock(int sock, char *buffer, ssize_t size) {
+    ssize_t wb, total = 0;
+    while ((wb = send(sock, buffer + total, size - total, 0)) != -1) {
+        total += wb;
+        if (total == size) {
+            break;
+        }
+    }
+    if (errno != EWOULDBLOCK) {
+        LOG_ERROR("failed on call to send(): %s", strerror(errno));
+        return -1;
+    }
+    return total;
+}
+
+int get_header(const char *headers_start, const char *headers_end, const char *key, char *value, size_t size) {
+    char search_key[128];
+    int len = snprintf(search_key, sizeof(search_key), "\r\n%s:", key);
+    if (len < 0 || len == sizeof(search_key)) {
+        LOG_ERROR("key '%s' is too long (max: %d)", key, sizeof(search_key));
+        return -1;
+    }
+
+    char *val_start = strcasestr(headers_start, key);
+    if (val_start == NULL || val_start > headers_end) {
+        return -1;
+    }
+    val_start += strlen(search_key);
+    while (isspace(*val_start)) {
+        val_start++;
+    }
+
+    char *val_end = val_start;
+    while (*val_end != '\r') {
+        val_end++;
+    }
+
+    len = (val_end - val_start);
+    if (len < 1) {
+        return -1;
+    }
+
+    if ((size_t)(len + 1) > size) {
+        return -1;
+    }
+
+    memcpy(val_start, value, len);
+    val_start[len] = '\0';
+
+    return 0;
+}
+
 /*
- * READING_EXTERNAL -> (WRITING_INTERNAL < - > READING_EXTERNAL) -> READING_INTERNAL -> (WRITING_EXTERNAL < - > READING_INTERNAL)
+ * READING_EXTERNAL -> (WRITING_INTERNAL <-> READING_EXTERNAL) -> READING_INTERNAL -> (WRITING_EXTERNAL <-> READING_INTERNAL)
  */
 int handle_event(struct context *ctx) {
-    int rwb;
+    ssize_t rwb;
     switch (ctx->state) {
-        case READING_EXTERNAL:
+        case READING_EXT_HDRS:
             rwb = read_until_wouldblock(ctx->external_sock, ctx->buffer, ctx->buffer_size);
             if (rwb == -1) {
                 LOG_ERROR("failed to read client socket");
@@ -157,17 +214,14 @@ int handle_event(struct context *ctx) {
             ctx->w_offset += rwb;
             char *eoh = strstr(ctx->buffer, "\r\n\r\n");
             if (eoh != NULL) {
-                // parse headers
                 // grab internal host header
+                char host[32];
+                if (get_header(ctx->buffer, eoh, "host", host, sizeof(host)) == -1){
+                    // need to return 404 or something
+                }
                 // connect to internal host
                 // set to wrtiing 
             }
-            break;
-        case WRITING_INTERNAL:
-            break;
-        case READING_INTERNAL:
-            break;
-        case WRITING_EXTERNAL:
             break;
         default:
             LOG_ERROR("client context is in undefined state: %d", ctx->state);

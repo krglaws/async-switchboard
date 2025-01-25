@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 /* Really just meant to count occurences of the delimiter
  * between key/value pairs to get an approximate map size.
@@ -69,7 +70,16 @@ ks_hashmap* new_map_from_str(const char* s, const char* delim1,
             end = mid + strlen(mid);
         }
 
-        ks_datacont* key = ks_datacont_new(next, KS_CHARP, mid - next);
+        int keylen = mid-next;
+        if (keylen < 1) {
+            goto ERROR;
+        }
+        char keybuff[keylen];
+        for (int i = 0; i < keylen; i++) {
+            keybuff[i] = tolower(*(next+i));
+        }
+
+        ks_datacont* key = ks_datacont_new(keybuff, KS_CHARP, keylen);
         ks_datacont* val = ks_datacont_new(mid + strlen(delim2), KS_CHARP,
                                            end - (mid + strlen(delim2)));
         const ks_datacont* exists = ks_hashmap_get(hm, key);

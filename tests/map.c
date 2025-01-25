@@ -68,9 +68,9 @@ void test_new_map_from_str_succeeds_headers() {
         char* val;
     };
     struct test_case tests[3] = {
-        {.key = "Content-Type", .val = " text/html"},
-        {.key = "Content-Length", .val = " 1024"},
-        {.key = "Host", .val = " www.google.com"},
+        {.key = "content-type", .val = " text/html"},
+        {.key = "content-length", .val = " 1024"},
+        {.key = "host", .val = " www.google.com"},
     };
 
     for (int i = 0; i < 3; i++) {
