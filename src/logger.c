@@ -12,12 +12,12 @@
 #include <time.h>
 #include <unistd.h>
 
-struct logger_args{
+struct logger_args {
     int in_fd;
     int out_fd;
 };
 
-struct logmsg{
+struct logmsg {
     char *msg;
     size_t size;
     size_t written;

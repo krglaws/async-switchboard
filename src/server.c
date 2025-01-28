@@ -1,19 +1,20 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
-#include <stdio.h>
-#include <stdbool.h>
-#include <kylestructs.h>
-#include <string.h>
-#include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <kylestructs.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <ctype.h>
 #include <unistd.h>
-#include <limits.h>
+
 #include "logger.h"
-#include <errno.h>
 #include "map.h"
 
 enum context_state {
@@ -99,7 +100,7 @@ static int create_listen_sock(const char *address, uint16_t port) {
     }
 
     // bind socket
-    if (bind(listen_sock, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+    if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         LOG_ERROR("failed on call to bind(): %s", strerror(errno));
         return -1;
     }
@@ -110,7 +111,7 @@ static int create_listen_sock(const char *address, uint16_t port) {
 static int new_connection(int epollfd, int listen_sock) {
     struct sockaddr_in6 addr = {0};
     socklen_t addrlen = sizeof(addr);
-    int conn_sock = accept(listen_sock, (struct sockaddr*)&addr, &addrlen);
+    int conn_sock = accept(listen_sock, (struct sockaddr *)&addr, &addrlen);
     if (conn_sock == -1) {
         LOG_ERROR("failed on call to accept(): %s", strerror(errno));
         return -1;
@@ -167,7 +168,8 @@ ssize_t write_until_wouldblock(int sock, char *buffer, ssize_t size) {
     return total;
 }
 
-int get_header(const char *headers_start, const char *headers_end, const char *key, char *value, size_t size) {
+int get_header(const char *headers_start, const char *headers_end,
+               const char *key, char *value, size_t size) {
     char search_key[128];
     int len = snprintf(search_key, sizeof(search_key), "\r\n%s:", key);
     if (len < 0 || len == sizeof(search_key)) {
@@ -205,7 +207,8 @@ int get_header(const char *headers_start, const char *headers_end, const char *k
 }
 
 void read_external_headers(struct context *ctx) {
-    ssize_t wb = read_until_wouldblock(ctx->external_sock, ctx->buffer, ctx->buffer_size);
+    ssize_t wb = read_until_wouldblock(ctx->external_sock, ctx->buffer,
+                                       ctx->buffer_size);
     if (wb == -1) {
         LOG_ERROR("failed to read client socket");
         // close everything and delete context
@@ -220,17 +223,15 @@ void read_external_headers(struct context *ctx) {
         return;
     }
     char host_buffer[HOST_NAME_MAX];
-    if (get_header(ctx->buffer, eoh, "host", host_buffer, sizeof(host_buffer)) == -1){
+    if (get_header(ctx->buffer, eoh, "host", host_buffer,
+                   sizeof(host_buffer)) == -1) {
         // return 400 (host header is required)
     }
     const char *ip = get_host_ip(host_buffer);
     if (ip == NULL) {
         // return 404 (host not found)
     }
-
-
 }
-
 
 /*
  * READING_EXTERNAL -> (WRITING_INTERNAL <-> READING_EXTERNAL) -> READING_INTERNAL -> (WRITING_EXTERNAL <-> READING_INTERNAL)
@@ -272,7 +273,7 @@ int serve(const char *address, uint16_t port, int max_events) {
 
     // TODO: need to use a hashmap to track internal/external socks -> context for cleanup
 
-    while(true) {
+    while (true) {
         int nfds = epoll_wait(epollfd, events, max_events, -1);
         if (nfds == -1) {
             LOG_ERROR("failed on call to epoll_wait(): %s", strerror(errno));
@@ -280,7 +281,7 @@ int serve(const char *address, uint16_t port, int max_events) {
         }
         struct context *ctx;
         for (int n = 0; n < nfds; ++n) {
-            ctx = (struct context *) events[n].data.ptr;
+            ctx = (struct context *)events[n].data.ptr;
             if (ctx->internal_sock == listen_sock) {
                 if (new_connection(epollfd, listen_sock) == -1) {
                     LOG_ERROR("failed to add new client connection");
