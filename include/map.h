@@ -5,6 +5,12 @@
 
 int init_host_map(const char* host_config);
 
+#define MAX_IP_LEN (64)
+struct host_info {
+    char ip[MAX_IP_LEN];
+    int port;
+};
+
 const struct host_info* get_host_info(const char* host_name);
 
 ks_hashmap* new_map_from_str(const char* s, const char* delim1,

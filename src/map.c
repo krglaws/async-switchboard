@@ -9,13 +9,6 @@
 
 #include "logger.h"
 
-#define MAX_IP_LEN (64)
-
-struct host_info {
-    char ip[MAX_IP_LEN];
-    int port;
-};
-
 ks_hashmap* host_map = NULL;
 
 void print_list_charp_dc(const ks_datacont* dc) {

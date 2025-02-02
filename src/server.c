@@ -16,9 +16,13 @@
 
 #include "logger.h"
 #include "map.h"
+#include "error_response.h"
+
+#define CLIENT_BUFFER_SIZE (1024 * 8)
 
 enum context_state {
     READING_EXT_HDRS,
+    CONNECTING_TO_HOST,
     WRITING_EXT_HDRS,
     READING_EXT_BODY,
     /* ^
@@ -42,12 +46,12 @@ enum context_state {
 struct context {
     int external_sock;
     int internal_sock;
-    char hostname[HOST_NAME_MAX];
+    enum context_state state;
     size_t r_offset;
     size_t w_offset;
-    size_t buffer_size;
+    char *external_address;
+    char *internal_hostname;
     char *buffer;
-    enum context_state state;
 };
 
 static int setnonblocking(int sock) {
@@ -108,29 +112,73 @@ static int create_listen_sock(const char *address, uint16_t port) {
     return listen_sock;
 }
 
+static struct context *new_context(int client_sock, struct sockaddr_storage *addr) {
+    struct context *ctx = calloc(1, sizeof(struct context));
+    ctx->external_sock = client_sock;
+    ctx->internal_hostname = malloc(HOST_NAME_MAX);
+    ctx->buffer = malloc(CLIENT_BUFFER_SIZE);
+    ctx->external_address = malloc(MAX_IP_LEN);
+    const void *sin_addr = &(((struct sockaddr_in *) addr)->sin_addr);
+    if (addr->ss_family == AF_INET6) {
+        sin_addr = &(((struct sockaddr_in6 *) addr)->sin6_addr);
+    }
+    if (inet_ntop(addr->ss_family, sin_addr, ctx->external_address, MAX_IP_LEN) == NULL) {
+        LOG_ERROR("failed to read client address: %s", strerror(errno));
+        strcpy(ctx->external_address, "UNKNOWN");
+    }
+    return ctx;
+}
+
+static void free_context(struct context *ctx) {
+    if (ctx->internal_hostname != NULL) {
+        free(ctx->internal_hostname);
+    }
+    if (ctx->external_address != NULL) {
+        free(ctx->external_address);
+    }
+    if (ctx->buffer != NULL) {
+        free(ctx->buffer);
+    }
+    free(ctx);
+}
+
+static void close_connection(int epollfd, struct context *ctx) {
+    if (ctx->external_sock != 0) {
+        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->external_sock, NULL) == -1) {
+            LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
+        }
+        close(ctx->external_sock);
+    }
+    if (ctx->internal_sock != 0) {
+        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->internal_sock, NULL) == -1) {
+            LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
+        }
+        close(ctx->internal_sock);
+    }
+    free_context(ctx);
+}
+
 static int new_connection(int epollfd, int listen_sock) {
-    struct sockaddr_in6 addr = {0};
+    struct sockaddr_storage addr = {0};
     socklen_t addrlen = sizeof(addr);
-    int conn_sock = accept(listen_sock, (struct sockaddr *)&addr, &addrlen);
-    if (conn_sock == -1) {
+    int client_sock = accept(listen_sock, (struct sockaddr *)&addr, &addrlen);
+    if (client_sock == -1) {
         LOG_ERROR("failed on call to accept(): %s", strerror(errno));
         return -1;
     }
 
-    if (setnonblocking(conn_sock) == -1) {
-        close(conn_sock);
+    if (setnonblocking(client_sock) == -1) {
+        close(client_sock);
         LOG_ERROR("failed to set client socket to non-blocking");
         return -1;
     }
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
-    struct context *ctx = calloc(1, sizeof(struct context));
-    ctx->external_sock = conn_sock;
-    ev.data.ptr = ctx;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock, &ev) == -1) {
-        free(ctx);
-        close(conn_sock);
+    ev.data.ptr = new_context(client_sock, &addr);
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, client_sock, &ev) == -1) {
+        free_context(ev.data.ptr);
+        close(client_sock);
         LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
         return -1;
     }
@@ -172,8 +220,13 @@ int get_header(const char *headers_start, const char *headers_end,
                const char *key, char *value, size_t size) {
     char search_key[128];
     int len = snprintf(search_key, sizeof(search_key), "\r\n%s:", key);
-    if (len < 0 || len == sizeof(search_key)) {
+    if (len == sizeof(search_key)) {
         LOG_ERROR("key '%s' is too long (max: %d)", key, sizeof(search_key));
+        return -1;
+    }
+
+    if (len < 0) {
+        LOG_ERROR("failed on call to snprintf(): %s", strerror(errno));
         return -1;
     }
 
@@ -206,19 +259,28 @@ int get_header(const char *headers_start, const char *headers_end,
     return 0;
 }
 
-void read_external_headers(struct context *ctx) {
+void read_external_headers(int epollfd, struct context *ctx) {
     ssize_t wb = read_until_wouldblock(ctx->external_sock, ctx->buffer,
-                                       ctx->buffer_size);
+                                       CLIENT_BUFFER_SIZE);
     if (wb == -1) {
         LOG_ERROR("failed to read client socket");
-        // close everything and delete context
+        close_connection(epollfd, ctx);
+        return;
     }
+
+    if (wb == 0) {
+        LOG_INFO("connection to %s closed", ctx->external_address);
+        close_connection(epollfd, ctx);
+        return;
+    }
+
     ctx->w_offset += wb;
 
     char *eoh = strstr(ctx->buffer, "\r\n\r\n");
     if (eoh == NULL) {
-        if (ctx->w_offset >= ctx->buffer_size) {
-            // return 400 (headers too big), disconnect & delete context
+        if (ctx->w_offset >= CLIENT_BUFFER_SIZE) {
+            // return 400 (headers too big)
+
         }
         return;
     }
@@ -226,10 +288,35 @@ void read_external_headers(struct context *ctx) {
     if (get_header(ctx->buffer, eoh, "host", host_buffer,
                    sizeof(host_buffer)) == -1) {
         // return 400 (host header is required)
+        return;
     }
-    const char *ip = get_host_ip(host_buffer);
-    if (ip == NULL) {
+    if (strcmp(host_buffer, ctx->internal_hostname) == 0) {
+        ctx->state = WRITING_EXT_HDRS;
+        return;
+    }
+    const struct host_info* hi = get_host_info(host_buffer);
+    if (hi == NULL) {
         // return 404 (host not found)
+        return;
+    }
+
+    if (ctx->internal_sock > 0) {
+        close(ctx->internal_sock);
+    }
+    ctx->internal_sock = socket(AF_INET6, SOCK_STREAM, 0);
+    if (setnonblocking(ctx->internal_sock) == -1) {
+        LOG_ERROR("failed to set client socket to non-blocking");
+        // return 500
+    }
+
+    struct in6_addr addr;
+    if (inet_pton(AF_INET6, hi->ip, &addr) == -1) {
+        LOG_ERROR("failed to convert address '%s': %s", host_buffer, strerror(errno));
+        // return 500
+    }
+
+    if (connect(ctx->internal_sock, &addr, sizeof(addr)) == -1) {
+
     }
 }
 
@@ -262,7 +349,7 @@ int serve(const char *address, uint16_t port, int max_events) {
         return -1;
     }
 
-    struct context *server_ctx = malloc(sizeof(struct context));
+    struct context *server_ctx = calloc(1, sizeof(struct context));
     server_ctx->internal_sock = listen_sock;
     ev.events = EPOLLIN;
     ev.data.ptr = server_ctx;
