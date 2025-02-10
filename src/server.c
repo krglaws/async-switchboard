@@ -20,9 +20,8 @@
 
 #define CLIENT_BUFFER_SIZE (1024 * 8)
 
-enum context_state {
+typedef enum {
     READING_EXT_HDRS,
-    CONNECTING_TO_HOST,
     WRITING_EXT_HDRS,
     READING_EXT_BODY,
     /* ^
@@ -40,8 +39,14 @@ enum context_state {
      * | until body is written
      * v
      */
-    WRITING_INT_BODY
-};
+    WRITING_INT_BODY,
+
+    /* error response states which can
+     * be entered at any time
+     */
+    WRITING_EXT_ERR,  // -> READING_EXT_HDRS
+    WRITING_EXT_ERR_CLOSE, // -> close
+} context_state;
 
 struct context {
     int external_sock;
@@ -49,6 +54,7 @@ struct context {
     enum context_state state;
     size_t r_offset;
     size_t w_offset;
+    size_t remaining;
     char *external_address;
     char *internal_hostname;
     char *buffer;
@@ -112,23 +118,6 @@ static int create_listen_sock(const char *address, uint16_t port) {
     return listen_sock;
 }
 
-static struct context *new_context(int client_sock, struct sockaddr_storage *addr) {
-    struct context *ctx = calloc(1, sizeof(struct context));
-    ctx->external_sock = client_sock;
-    ctx->internal_hostname = malloc(HOST_NAME_MAX);
-    ctx->buffer = malloc(CLIENT_BUFFER_SIZE);
-    ctx->external_address = malloc(MAX_IP_LEN);
-    const void *sin_addr = &(((struct sockaddr_in *) addr)->sin_addr);
-    if (addr->ss_family == AF_INET6) {
-        sin_addr = &(((struct sockaddr_in6 *) addr)->sin6_addr);
-    }
-    if (inet_ntop(addr->ss_family, sin_addr, ctx->external_address, MAX_IP_LEN) == NULL) {
-        LOG_ERROR("failed to read client address: %s", strerror(errno));
-        strcpy(ctx->external_address, "UNKNOWN");
-    }
-    return ctx;
-}
-
 static void free_context(struct context *ctx) {
     if (ctx->internal_hostname != NULL) {
         free(ctx->internal_hostname);
@@ -142,24 +131,22 @@ static void free_context(struct context *ctx) {
     free(ctx);
 }
 
-static void close_connection(int epollfd, struct context *ctx) {
+static void close_context(int epollfd, struct context *ctx) {
+    // TODO: might want to rewrite this so that it checks for
+    // which of these sockets is actually tracked by epollfd
     if (ctx->external_sock != 0) {
-        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->external_sock, NULL) == -1) {
-            LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
-        }
+        epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->external_sock, NULL);
         close(ctx->external_sock);
     }
     if (ctx->internal_sock != 0) {
-        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->internal_sock, NULL) == -1) {
-            LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
-        }
+        epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->internal_sock, NULL);
         close(ctx->internal_sock);
     }
     free_context(ctx);
 }
 
-static int new_connection(int epollfd, int listen_sock) {
-    struct sockaddr_storage addr = {0};
+static int new_context(int epollfd, int listen_sock) {
+    struct sockaddr_storage addr;
     socklen_t addrlen = sizeof(addr);
     int client_sock = accept(listen_sock, (struct sockaddr *)&addr, &addrlen);
     if (client_sock == -1) {
@@ -173,11 +160,28 @@ static int new_connection(int epollfd, int listen_sock) {
         return -1;
     }
 
-    struct epoll_event ev;
+    struct context *ctx = calloc(1, sizeof(struct context));
+    ctx->external_sock = client_sock;
+    ctx->internal_hostname = malloc(HOST_NAME_MAX);
+    ctx->buffer = malloc(CLIENT_BUFFER_SIZE);
+    ctx->external_address = malloc(MAX_IP_LEN);
+    const void *sin_addr = &(((struct sockaddr_in *) &addr)->sin_addr);
+    if (addr.ss_family == AF_INET6) {
+        sin_addr = &(((struct sockaddr_in6 *) &addr)->sin6_addr);
+    }
+    if (inet_ntop(addr.ss_family, sin_addr, ctx->external_address, MAX_IP_LEN) == NULL) {
+        LOG_ERROR("failed to read client address: %s", strerror(errno));
+        strcpy(ctx->external_address, "UNKNOWN");
+    }
+
+    struct epoll_event ev = {
+        .events=EPOLLIN,
+        .data.ptr=ctx,
+    };
     ev.events = EPOLLIN;
-    ev.data.ptr = new_context(client_sock, &addr);
+    ev.data.ptr = ctx;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, client_sock, &ev) == -1) {
-        free_context(ev.data.ptr);
+        free_context(ctx);
         close(client_sock);
         LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
         return -1;
@@ -259,18 +263,73 @@ int get_header(const char *headers_start, const char *headers_end,
     return 0;
 }
 
+static int change_context_direction(int epollfd, struct context *ctx, int add_sock, int epoll_event) {
+    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->internal_sock, NULL) == -1) {
+        if (errno != ENOENT) {
+            LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
+            return -1;
+        }
+    }
+    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->external_sock, NULL) == -1) {
+        if (errno != ENOENT) {
+            LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
+            return -1;
+        }
+    }
+    struct epoll_event ev = {
+        .events=epoll_event,
+        .data.ptr=ctx,
+    };
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, add_sock, &ev) == -1) {
+        LOG_ERROR("failed on call to epoll_ctl(): %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int set_reading_external(int epollfd, struct context *ctx) {
+    return change_context_direction(epollfd, ctx, ctx->external_sock, EPOLLIN);
+}
+
+static int set_writing_external(int epollfd, struct context *ctx) {
+    return change_context_direction(epollfd, ctx, ctx->external_sock, EPOLLOUT);
+}
+
+static int set_reading_internal(int epollfd, struct context *ctx) {
+    return change_context_direction(epollfd, ctx, ctx->internal_sock, EPOLLIN);
+}
+
+static int set_writing_internal(int epollfd, struct context *ctx) {
+    return change_context_direction(epollfd, ctx, ctx->internal_sock, EPOLLOUT);
+}
+
+static int set_sending_error(int epollfd, struct context *ctx, http_status status) {
+    if (set_writing_external(epollfd, ctx) == -1) {
+        LOG_ERROR("failed to monitor external socket for writing");
+        return -1;
+    }
+    ssize_t size = build_error_response(status, ctx->buffer, CLIENT_BUFFER_SIZE);
+    if (size == -1) {
+        LOG_ERROR("failed to build error response");
+        return -1;
+    }
+    ctx->r_offset = 0;
+    ctx->w_offset = size;
+    ctx->remaining = size;
+}
+
 void read_external_headers(int epollfd, struct context *ctx) {
-    ssize_t wb = read_until_wouldblock(ctx->external_sock, ctx->buffer,
-                                       CLIENT_BUFFER_SIZE);
+    ssize_t wb = read_until_wouldblock(ctx->external_sock, ctx->buffer + ctx->w_offset,
+                                       CLIENT_BUFFER_SIZE - ctx->w_offset);
     if (wb == -1) {
         LOG_ERROR("failed to read client socket");
-        close_connection(epollfd, ctx);
+        close_context(epollfd, ctx);
         return;
     }
 
     if (wb == 0) {
         LOG_INFO("connection to %s closed", ctx->external_address);
-        close_connection(epollfd, ctx);
+        close_context(epollfd, ctx);
         return;
     }
 
@@ -279,28 +338,53 @@ void read_external_headers(int epollfd, struct context *ctx) {
     char *eoh = strstr(ctx->buffer, "\r\n\r\n");
     if (eoh == NULL) {
         if (ctx->w_offset >= CLIENT_BUFFER_SIZE) {
-            // return 400 (headers too big)
-
+            // headers are too big
+            ctx->state = WRITING_EXT_ERR_CLOSE;
+            if (set_sending_error(epollfd, ctx, HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE) == -1) {
+                LOG_ERROR("failed to send error message to client");
+                close_context(epollfd, ctx);
+            }
+            return;
         }
-        return;
     }
     char host_buffer[HOST_NAME_MAX];
     if (get_header(ctx->buffer, eoh, "host", host_buffer,
                    sizeof(host_buffer)) == -1) {
-        // return 400 (host header is required)
+        // host header missing
+        ctx->state = WRITING_EXT_ERR;
+        if (set_sending_error(epollfd, ctx, HTTP_BAD_REQUEST) == -1) {
+            LOG_ERROR("failed to send error message to client");
+            close_context(epollfd, ctx);
+        }
         return;
     }
     if (strcmp(host_buffer, ctx->internal_hostname) == 0) {
         ctx->state = WRITING_EXT_HDRS;
+        if (set_writing_internal(epollfd, ctx) == 0) {
+            ctx->r_offset = 0;
+            return;
+        }
+            LOG_ERROR("failed to send error message to client");
+            ctx->state = WRITING_EXT_ERR;
+            if (set_sending_error(epollfd, ctx, HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE) == -1) {
+                LOG_ERROR("failed to send error message to client");
+            }
+            close_context(epollfd, ctx);
+        }
         return;
     }
     const struct host_info* hi = get_host_info(host_buffer);
     if (hi == NULL) {
-        // return 404 (host not found)
+        ctx->state = WRITING_EXT_ERR;
+        if (set_writing_external(epollfd, ctx) == -1) {
+            // host not found
+            LOG_ERROR("failed to send error message to client");
+            close_context(epollfd, ctx);
+        }
         return;
     }
 
-    if (ctx->internal_sock > 0) {
+    if (ctx->internal_sock != 0) {
         close(ctx->internal_sock);
     }
     ctx->internal_sock = socket(AF_INET6, SOCK_STREAM, 0);
@@ -315,8 +399,20 @@ void read_external_headers(int epollfd, struct context *ctx) {
         // return 500
     }
 
-    if (connect(ctx->internal_sock, &addr, sizeof(addr)) == -1) {
+    if (connect(ctx->internal_sock, (struct sockaddr*)&addr, sizeof(addr)) == -1 && errno != EINPROGRESS) {
+        // return 500
+    }
 
+    ctx->state = WRITING_EXT_HDRS;
+    struct epoll_event ev = {
+        .events=EPOLLOUT,
+        .data.ptr=ctx
+    };
+    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, ctx->external_sock, NULL) == -1) {
+        // return 500
+    }
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, ctx->internal_sock, &ev) == -1) {
+        // return 500
     }
 }
 
@@ -370,7 +466,7 @@ int serve(const char *address, uint16_t port, int max_events) {
         for (int n = 0; n < nfds; ++n) {
             ctx = (struct context *)events[n].data.ptr;
             if (ctx->internal_sock == listen_sock) {
-                if (new_connection(epollfd, listen_sock) == -1) {
+                if (new_context(epollfd, listen_sock) == -1) {
                     LOG_ERROR("failed to add new client connection");
                 }
             } else {
